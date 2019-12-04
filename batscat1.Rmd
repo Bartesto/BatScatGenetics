@@ -1,0 +1,226 @@
+---
+title: "Mass Array Error Calculations"
+subtitle: "Part one of three"
+author: "Bart Huntley"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+### Introduction
+This rmarkdown document is the first of 3 that will process bat scat mass array data. 
+
+The rmarkdown documents are as follows:
+
+1. Error calculations (batscat1.Rmd) - *this document*
+2. Calculating groups and majority cases (batscat2.Rmd)
+3. Final visualisation and export to structure format (batscat3.Rmd)
+
+These documents will show all code to allow for transparency. There will be sections that require input from the **USER** prior to running. It is intended that the html output accompany any csv output to act as a reproducible record.
+
+#### Libraries
+```{r, libraries, eval=TRUE, message=FALSE, warning=FALSE}
+# required packages 
+list.of.packages <- c("tidyverse", "janitor")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+# load packages
+library(tidyverse)
+library(janitor)
+```
+
+#### 1 - Get the raw data
+**USER** Change the filepath and name of raw data as necessary. This block ingests the data cleans names and makes ready for further analysis.
+```{r, raw_data_in, eval=TRUE, message=FALSE, warning=FALSE}
+# file path to raw data
+fp_in <- "../source"
+
+# name of raw data csv
+n <- "MassArray2.csv"
+
+# construct full name
+csvdat <- file.path(fp_in, n)
+
+# clean names and toss tissue samples in dataset make blanks NA
+na_dat <- read_csv(csvdat, na = "Fail") %>% 
+  janitor::clean_names() %>%
+  dplyr::filter(sample_type == "Scat")
+
+# same data but retain blanks (need for amplification rate)
+all_dat <- read_csv(csvdat) %>% 
+  janitor::clean_names() %>%
+  dplyr::filter(sample_type == "Scat") %>%
+  tidyr::pivot_longer(cols = starts_with("x"),
+                      names_to = "marker",
+                      values_to = "val") %>%
+  dplyr::mutate(val = ifelse(val == "Fail", "", val)) %>%
+  tidyr::pivot_wider(names_from = marker,
+                     values_from = val)
+
+# check
+all_dat[1:10, 1:6]
+```
+
+#### 2 - Error calculations
+This code block produces 3 important datasets:
+
+1. `results_out` - for each sample the following errors are calculated:
+    + average amplification rate
+    + allele error
+    + locus error
+    + allelic drop out
+    + false allele
+2. `summaries` - mean and standard error for the above errors for whole dataset
+3. `num_out` - taking into account the errors, recodes letters to numerical output
+```{r, calc_errs, eval=TRUE, message=FALSE, warning=FALSE}
+# just variables
+df_loci <- na_dat  %>%
+  dplyr::select(starts_with("X")) # keep loci columns for calcs
+
+# clean with blanks
+cl_dat_bl <- all_dat[rowSums(is.na(df_loci)) != ncol(df_loci),]
+
+# clean with na's
+cl_dat_na <- na_dat[rowSums(is.na(df_loci)) != ncol(df_loci),]
+
+# merge alleles function for grouping step
+f1 <- function(x){trimws(paste(x, collapse = ''))}
+
+# set up for loop variables stuff to use in loop
+lgth_vars <- dim(df_loci)[2]
+u_samp <- unique(unlist(cl_dat_bl[, 1]))
+samp_names <- paste0("s", u_samp)
+
+# set up data frames to hold results
+results_out <- data.frame(stringsAsFactors = FALSE)
+num_out <- data.frame(stringsAsFactors = FALSE)
+
+# loop and calculate interim and end results
+for(i in seq_along(u_samp)){
+  # using na data
+  avg_amp_rate <- cl_dat_na %>%
+    dplyr::filter(sample == u_samp[i]) %>%
+    tidyr::pivot_longer(cols = starts_with("x"),
+                        names_to = "vars",
+                        values_to = "vals") %>%
+    dplyr::group_by(rep) %>%
+    dplyr::summarise(amp_rate = sum(!is.na(vals))/lgth_vars) %>%
+    dplyr::summarise(avg_amp_rate = mean(amp_rate))
+  
+  # interim data (creating new variables to calculate errors)
+  d <- cl_dat_bl %>%
+    dplyr::filter(sample == u_samp[i]) %>%
+    dplyr::group_by(sample) %>%
+    dplyr::summarise_all(.funs = f1) %>%
+    dplyr::ungroup() %>%
+    tidyr::pivot_longer(cols = starts_with("x"),
+                        names_to = "vars",
+                        values_to = "vals") %>%
+    dplyr::mutate(
+      f = case_when(
+        nchar(vals) == 4 ~ vals,
+        TRUE ~ ""),
+      c = nchar(f),
+      loc_err = ifelse(c == 4 & substr(f, 1, 2) != substr(f, 3, 4),
+                       0.5, 0),
+      p1 = substr(f, 1, 1),
+      p2 = substr(f, 2 ,2),
+      p3 = substr(f, 3, 3),
+      p4 = substr(f, 4 ,4),
+      a_mm1 = ifelse(c == 4 & p1 != p3, 1, 0),
+      a_mm2 = ifelse(c == 4 & p2 != p4, 1, 0),
+      a_err = (a_mm1 + a_mm2)/4, 
+      het_only = case_when(
+        p1 == p2 & p3 == p4 ~ 0,
+        TRUE ~ 1),
+      a_drop = case_when(
+        het_only == 1 & substr(f, 1, 2) != substr(f, 3, 4) ~ 0.5,
+        TRUE ~ 0),
+      fa = case_when(
+        c == 4 & het_only == 0 & substr(f, 1 ,2) != substr(f, 3 ,4) ~ 0.5,
+        TRUE ~ 0))
+  
+  # take interim data and use to convert to numerical values for export
+  num_vals <- d %>%
+    dplyr::mutate(new_var = case_when(
+      nchar(vals) == 2 ~ substr(vals, 1, 2),
+      nchar(vals) == 4 & substr(vals, 1, 2) == substr(vals, 3, 4) ~ substr(vals, 1, 2),
+      TRUE ~ "NA"
+    )) %>%
+    dplyr::mutate(to_recode = case_when(
+      new_var == "NA" ~ 0,
+      TRUE ~ 1
+    ),
+    a1 = ifelse(to_recode == 1, substr(vals, 1, 1), NA),
+    b1 = ifelse(to_recode == 1, substr(vals, 2, 2), NA),
+    a = case_when(
+      a1 == "A" ~ 110,
+      a1 == "T" ~ 120,
+      a1 == "G" ~ 130,
+      a1 == "C" ~ 140
+    ),
+    b = case_when(
+      b1 == "A" ~ 110,
+      b1 == "T" ~ 120,
+      b1 == "G" ~ 130,
+      b1 == "C" ~ 140)
+    ) %>%
+    dplyr::select(sample, vars, a, b) %>%
+    tidyr::pivot_longer(cols = c("a", "b"),
+                        names_to = "locus",
+                        values_to = "value") %>%
+    dplyr::arrange(vars, locus) %>%
+    tidyr::pivot_wider(names_from = c(vars, locus), values_from = value)
+  
+  # take interim data and calculate errors for export
+  results <- d %>%
+    dplyr::summarise(locus_error = sum(loc_err)/sum(c == 4),
+                     allele_error = sum(a_err)/sum(c == 4),
+                     allelic_drop_out = sum(a_drop)/sum(het_only),
+                     false_allele = sum(fa)/(sum(c)/4)) %>%
+    dplyr::bind_cols(avg_amp_rate) %>%
+    dplyr::mutate(sample = samp_names[i]) %>%
+    dplyr::select(sample, avg_amp_rate, allele_error, locus_error, allelic_drop_out, 
+                  false_allele)
+  
+  # bind exports to appropriate result data frames
+  results_out <- dplyr::bind_rows(results_out, results)
+  num_out <- dplyr::bind_rows(num_out, num_vals)
+}
+
+# take the error results and further summarise
+summaries <- results_out %>%
+  tidyr::pivot_longer(cols = -sample,
+                      names_to = "error",
+                      values_to = "value") %>%
+  dplyr::group_by(error) %>%
+  dplyr::summarise(avg = mean(value, na.rm = TRUE),
+                   se = sd(value, na.rm = TRUE)/sqrt(n()))
+
+# check
+summaries
+```
+
+#### 3 - Export results to csv
+This code block will write the datasets from above to csv. The `num_out` dataset will be required for continued analysis with the remaining rmarkdown documents.
+
+**USER** outputs will be written to `/results`. Ensure you adjust the filepath to suit your situation.
+```{r, export, eval=TRUE, message=FALSE, warning=FALSE}
+# desired file path for output
+fp_out <- "."
+
+# create results directory if doesn't exist
+resultsDir <- file.path(fp_out, "results")
+
+ifelse(!dir.exists(resultsDir), 
+       dir.create(resultsDir), FALSE)
+
+# write to file errors per sample
+write_csv(results_out, paste0(resultsDir, "/sample_error_results.csv"))
+
+# write to file summary errors for whole of data run
+write_csv(summaries, paste0(resultsDir, "/summary_error_results.csv"))
+
+# write to file numerical version
+write_csv(num_out, paste0(resultsDir, "/numerical_alleles.csv"))
+```

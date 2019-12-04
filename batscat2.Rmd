@@ -1,0 +1,264 @@
+---
+title: "Groups And Majority Cases"
+subtitle: "Part two of three"
+author: "Bart Huntley"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+### Introduction
+This rmarkdown document is the second of 3 that will process bat scat mass array data. The rmarkdown documents are as follows:
+
+1. Error calculations (batscat1.Rmd)
+2. Calculating groups and majority cases (batscat2.Rmd) *this document*
+3. Final visualisation and export to structure format (batscat3.Rmd)
+
+These documents will show all code to allow for transparency and adjustment. There will be sections that require input from the **USER** prior to running. It is intended that the html output accompany any csv output to act as a reproducible record.
+
+#### Libraries
+```{r, libraries, eval=TRUE, message=FALSE, warning=FALSE}
+# required package
+list.of.packages <- "tidyverse"
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+# load package
+library(tidyverse)
+```
+
+#### 1 - Load numerical data and calculate mismatches
+**USER** The numerical data required for this code block was output from `batscat1.Rmd`. If you have not run that rmarkdown document please do so prior to this. 
+
+**USER** Please change the filepath to the `/results` directory where the data was saved to.
+```{r, data_in, eval=TRUE, message=FALSE, warning=FALSE}
+# change if required
+fp <- "./results"
+n <- "numerical_alleles.csv"
+n2 <- "sample_error_results.csv"
+
+# construct full name
+csvdat <- file.path(fp, n)
+csvdat2 <- file.path(fp, n2)
+
+# read in numerical data and grab sample errors to add in later
+num_out <- read_csv(csvdat)
+results_out <- read_csv(csvdat2)
+
+```
+
+This code block will construct matrices and data frames for unique pair comparisons and output for a dissimilar matrix to be generated in a following code block. Pair comparisons (missmatches) will aid grouping anaysis.
+
+```{r, output_setup, eval=TRUE, message=FALSE, warning=FALSE}
+# names for making matrices
+samp_names <- unique(num_out$sample)
+samp_rows <- samp_names[-1]
+samp_cols <- samp_names[-length(samp_names)]
+
+# output df for unique combos of pair comparisons
+out_df <- data.frame(t(combn(samp_names, 2)), mm = 0, stringsAsFactors = FALSE)
+
+# output df for conversion to dissimilar matrix
+out_df2 <- data.frame(matrix(NA, nrow = length(samp_names)-1, 
+                             ncol = length(samp_names)-1)) 
+colnames(out_df2) <- samp_cols
+row.names(out_df2) <- samp_rows
+```
+
+This code block will calculate mismatches between unique pairs - it can take several minutes. 
+```{r, missmatch, eval=TRUE, message=FALSE, warning=FALSE}
+# calculate mismatches between unique pairs 
+for(i in seq_along(out_df[,1])){
+  samp <- out_df[i, 1]
+  samp2 <- out_df[i, 2]
+  
+  df <- num_out %>%
+    dplyr::filter(sample == samp) %>%
+    tidyr::pivot_longer(cols = starts_with("x"),
+                        names_to = "vars",
+                        values_to = "val")
+  
+  df2 <- num_out %>%
+    dplyr::filter(sample == samp2) %>%
+    tidyr::pivot_longer(cols = starts_with("x"),
+                        names_to = "vars",
+                        values_to = "val")
+  
+  df3 <- df %>%
+    dplyr::mutate(val2 = df2$val,
+           s = val + val2,
+           mm = case_when(
+             s > 200 & val != val2 ~ 1,
+             TRUE ~ 0
+           )) %>%
+    dplyr::summarise(tmm = sum(mm))
+  
+  out_df[i, 3] <- df3[[1]]
+  
+}
+```
+
+#### 2 - Create a dissimilar matrix based on mismatches
+
+The basis of the grouping will rely dissimilarity scores (mismatches) therefore a matrix needs to be constructed
+```{r, dissim, eval=TRUE, message=FALSE, warning=FALSE}
+# grab uniques (matches colnames in dissim matrix)
+u_rows <- unique(out_df$X1)
+
+# populate disimilar df with mismatch values
+for(i in seq_along(u_rows)){
+  s <- u_rows[i] 
+  out <- out_df %>%
+    filter(X1 == s) %>%
+    select(mm)
+  out_df2[i:length(out_df2[1,]), i] <- out[[1]]
+}
+
+
+# grab values and names
+tempvect <- as.vector(na.omit(unlist(out_df2)))
+all_names <-  unique(c(colnames(out_df2), row.names(out_df2)))
+```
+
+#### 3 - Cluster analysis and group assignation
+Now need to convert the dissimilarity matrix to a `dist` class object to perform a cluster anlaysis. This code block will do that and output a dendrogram for a quick visualisation. The euclidean distance here is the mismatch number.
+```{r, cluster, eval=TRUE, message=FALSE, warning=FALSE}
+# create dist class object (attributes describe our matrix)
+dist <- structure(tempvect, Size = length(all_names), Labels = all_names,
+                  Diag = FALSE, Upper = FALSE, method = "euclidean", #Optional
+                  class = "dist")
+
+# perform cluster analysis
+clust <- hclust(dist)
+
+# plot dendrogram to visualise
+plot(as.dendrogram(clust),ylab = "Euclidean distance")
+```
+
+To help determine what threshold of mismatches will be used to "cut the tree", an elbow plot will be created. The function to create the plot takes an argument `max_cut`. This is the maximum height that the cluster tree should be cut and helps spread the plot out to visualise the location of the "elbow".
+
+**USER** the elbow plot will be saved to the `/results` directory. Change this if desired.
+```{r, elbow, eval=TRUE, message=FALSE, warning=FALSE}
+# function to create "elbow" plot
+plot_grp_v_mm <- function(cluster, max_cut = 10){
+  plotdf <- data.frame()
+  for(i in 0:max_cut){
+    sub_grp <- cutree(cluster, k = NULL, h = i)
+    df <- data.frame(threshold = i, groups = length(table(sub_grp)))
+    plotdf <- dplyr::bind_rows(plotdf, df)
+  }
+  p1 <- ggplot(plotdf) +
+    geom_line(aes(x = threshold, y = groups)) +
+    scale_x_continuous(breaks = c(0:max_cut)) +
+    labs(y = "Groups",
+         x = "Mismatch Threshold") +
+    theme_bw()
+  p1
+}
+
+# create "elbow" plot user input mismatch max_cut variable
+plot_grp_v_mm(cluster = clust, max_cut = 10)
+
+
+# save a copy of the plot
+fp <- "./results"
+elbow_out <- file.path(fp, "group_mismatch_elbow.png")
+ggsave(elbow_out)
+```
+
+Based on the example worked here, a mismatch threshold of 4 will be used to identify group membership of the samples.
+
+**USER** adjust the `h = ` parameter in the cutree function call below to choose a different threshold.
+
+The following code block will assign group membership based on the threshold to the original numerical data and output to csv.
+
+**USER** change file path if you wish a different loction for output.
+```{r, groups_output, eval=TRUE, message=FALSE, warning=FALSE}
+# create desired group number based on mismatch threshold identified from elbow plot
+subgrp <- cutree(clust, k = NULL, h = 4)
+
+# add to numerical data
+mmout_df <- num_out %>%
+  dplyr::mutate(group = subgrp) %>%
+  dplyr::select(group, everything()) %>%
+  dplyr::arrange(group)
+
+# change file path if required
+fp <- "./results"
+groups_out <- file.path(fp, "numerical_mismatch_4_withGroups.csv")
+
+# suggest adjust name to include mismatch threshold chosen
+write_csv(mmout_df, groups_out)
+```
+
+#### 4 - Calculate majority case per group
+This next stage will work out the majority case for each replicate based on the mode (most frequent value). 
+
+**NOTE** if there are "ties" the first value will be returned. This may not be the desired result when assessed against the other replicate. Therefore the code block will also indicate which replicates have experienced a "tie" scenario. 
+
+**USER** will need to check the csv output and edit any "tied" value if required. This will need to be performed prior to `batscat3.Rmd` being run.
+
+**USER** change file path if you wish a different location for output.
+```{r, majorities, eval=TRUE, message=FALSE, warning=FALSE}
+# function to return mode of a vector with NAs
+Mode <- function(x, na.rm = FALSE) {
+  if(na.rm){
+    x = x[!is.na(x)]
+  }
+  ux <- unique(x)
+  return(ux[which.max(tabulate(match(x, ux)))])
+}
+
+# function to indicate "tie" status
+TieMode <- function(x, na.rm = FALSE) {
+  if(na.rm){
+    x = x[!is.na(x)]
+  }
+  ux <- unique(x)
+  res <- tabulate(match(x, ux))
+  tie <- ifelse(sum(res %in% max(res)) > 1, "tie", "ok")
+  return(tie)
+}
+
+# calculate majority vote (using mode)
+d1 <- mmout_df %>%
+  tidyr::pivot_longer(cols = starts_with("x"),
+                      names_to = "vars",
+                      values_to = "val") %>%
+  dplyr::group_by(group, vars) %>%
+  dplyr::summarise(maj = Mode(val, na.rm = TRUE)) %>%
+  tidyr::pivot_wider(names_from = vars,
+                     values_from = maj) %>%
+  dplyr::mutate(sample = "majority") %>%
+  dplyr::select(group, sample, starts_with("x")) %>%
+  dplyr::bind_rows(mmout_df) %>%
+  dplyr::arrange(group, sample) %>%
+  dplyr::ungroup()
+
+d2 <-  mmout_df %>%
+  tidyr::pivot_longer(cols = starts_with("x"),
+                      names_to = "vars",
+                      values_to = "val") %>%
+  dplyr::group_by(group, vars) %>%
+  dplyr::summarise(tie = TieMode(val, na.rm = TRUE)) %>%
+  dplyr::mutate(tie2 = ifelse(tie == "tie", 1, 0)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-tie) %>%
+  tidyr::pivot_wider(names_from = vars,
+                     values_from = tie2) %>%
+  dplyr::mutate(sample = "tie") %>%
+  dplyr::select(group, sample, starts_with("x"))
+
+d3 <- dplyr::bind_rows(d1, d2) %>%
+  dplyr::arrange(group, sample)
+
+avg_sam_amp_rate <- results_out[,1:2] %>%
+  dplyr::mutate(sample = gsub("s", "", sample))
+
+d4 <- dplyr::left_join(d3, avg_sam_amp_rate)
+
+# change file path if required
+fp <- "./results"
+maj_out <- file.path(fp, "/group_majorities_and_ties.csv")
+
+write_csv(d4, maj_out)
+```

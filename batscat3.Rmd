@@ -1,0 +1,118 @@
+---
+title: "Visual Check And Export"
+subtitle: "Part three of three"
+author: "Bart Huntley"
+date: "03/12/2019"
+output: html_document
+---
+
+### Introduction
+This rmarkdown document is the final of 3 that will process bat scat mass array data. The rmarkdown documents are as follows:
+
+1. Error calculations (batscat1.Rmd)
+2. Calculating groups and majority cases (batscat2.Rmd)
+3. Final visualisation and export to structure format (batscat3.Rmd) - *this document*
+
+These documents will show all code to allow for transparency and adjustment. There will be sections that require input from the **USER** prior to running. It is intended that the html output accompany any csv output to act as a reproducible record.
+
+#### Libraries
+```{r, libraries, eval=TRUE, message=FALSE, warning=FALSE}
+# required packages
+list.of.packages <- c("tidyverse", "kableExtra", "formattable")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+# load packages
+library(tidyverse)
+library(kableExtra)
+library(formattable)
+```
+
+#### 1 - Read in edited group majority dataset and visualise
+**USER** The numerical data required for this code block was output from `batscat2.Rmd`. If you have not run that rmarkdown document please do so prior to this.
+
+The starting point for this analysis is the `group_majorities_and_ties.csv`. This dataset may have been edited when quality assessing tied majority cases.
+
+**USER** Please change the filepath to the `/results` directory where the data was saved to. Also change the csv name if edited version is different.
+```{r, data_in, eval=TRUE, message=FALSE, warning=FALSE}
+# change if required
+fp_in <- "./results"
+n <- "group_majorities_and_ties.csv"
+
+# construct full name
+csvdat <- file.path(fp_in, n)
+
+# read in data and grab unique group ids
+d <- read_csv(csvdat)
+gps <- unique(d$group)
+
+```
+
+Conditional formatting is a handy visualisation technique that assists identifying possible problem data. It is uesd here to highlight any samples that have different values to the majority case for the group.
+
+Due to the format of the data it requires a loop to cycle through the groups and multiple data formatting (long to wide, wide to long) to achieve the intended result. The majority of the conditional formatting is achieved by a custom function. This function should be readily adaptable if required.
+```{r, cond_table, eval=TRUE, message=FALSE, warning=FALSE}
+# empty data frame for results
+tbl_df <- data.frame(stringsAsFactors = FALSE)
+
+# function for bulk of conditional formatting
+diff_to_maj <- function(x){
+  ifelse(x == d1$majority,
+         cell_spec(x, "html", color = "green", italic = T),
+         cell_spec(x, "html", color = "red", bold = T))
+}
+
+
+# loop to conditionally format each group
+for(i in seq_along(gps)){
+  d1 <- d %>%
+    dplyr::filter(group == gps[i]) %>%
+    dplyr::filter(sample != "tie") %>%
+    dplyr::select(-avg_amp_rate) %>%
+    tidyr::pivot_longer(cols = starts_with("x"), names_to = "vars", 
+                 values_to = "vals") %>%
+    tidyr::pivot_wider(names_from = sample, values_from = vals) %>%
+    dplyr::mutate_each(funs(replace(., is.na(.), 0)))
+  
+  d2 <- d1 %>%
+    dplyr::mutate_at(vars(starts_with("19")), diff_to_maj) %>%
+    dplyr::mutate(majority = as.character(majority)) %>%
+    dplyr::mutate(majority = cell_spec(majority, background = "darkgrey", 
+                                color = "white", align = "center")) %>%
+    tidyr::pivot_longer(cols = c(-group, -vars), names_to = "sample", 
+                 values_to = "vals") %>%
+    tidyr::pivot_wider(names_from = vars, values_from = vals)
+  
+  tbl_df <- bind_rows(tbl_df, d2)
+}
+
+# make and view the table
+tbl_df %>%
+  kable(format = "html", escape = F) %>%
+  kable_styling("striped", fixed_thead = T, full_width = F) %>%
+  scroll_box(width = "100%", height = "800px")
+```
+
+#### 2 - Export to structure format
+The last code block below will export the group majorities in *structure* format.
+
+**USER** the csv will be saved to the `/results` directory. Change this if desired.
+``````{r, export, eval=TRUE, message=FALSE, warning=FALSE}
+# grab only majorities, reformat and rearrange
+structure_format <- d %>%
+  dplyr::filter(sample == "majority") %>%
+  dplyr::mutate(g = paste0("Group", group)) %>%
+  dplyr::select(g, contains("_a"), contains("_b"))
+
+# convert NA to -9
+structure_format[is.na(structure_format)] <- -9
+
+# get rid of firts column name to match structure format
+colnames(structure_format)[1] <- ""
+
+# save to csv
+fp <- "./results"
+structure_out <- file.path(fp, "group_majorities_structure_format.csv")
+
+write_csv(structure_format, structure_out)
+```
